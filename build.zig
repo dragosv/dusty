@@ -4,9 +4,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const zio_backend = b.option([]const u8, "zio_backend", "Override zio event loop backend (io_uring, epoll, kqueue, iocp, poll)");
+
     const zio = b.dependency("zio", .{
         .target = target,
         .optimize = optimize,
+        .backend = zio_backend,
     });
 
     const mod = b.addModule("dusty", .{

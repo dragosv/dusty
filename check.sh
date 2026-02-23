@@ -9,10 +9,11 @@ TEST_LOG_CAPTURE="true"
 TEST_FAIL_FIRST="false"
 TEST_VERBOSE="true"
 CI_MODE=false
+ZIO_BACKEND=""
 
 # Parse arguments
 usage() {
-  echo "Usage: $0 [--test-filter \"test name\"] [--test-log-capture true|false] [--test-fail-first true|false] [--test-verbose true|false] [--ci]"
+  echo "Usage: $0 [--test-filter \"test name\"] [--test-log-capture true|false] [--test-fail-first true|false] [--test-verbose true|false] [--ci] [--zio-backend epoll|io_uring|kqueue|poll]"
 }
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -40,6 +41,10 @@ while [[ $# -gt 0 ]]; do
             CI_MODE=true
             shift
             ;;
+        --zio-backend)
+            [[ $# -ge 2 ]] || { echo "--zio-backend requires an argument"; usage; exit 1; }
+            ZIO_BACKEND="$2"; shift 2
+            ;;
         *)
             echo "Unknown option: $1"
             usage
@@ -65,11 +70,16 @@ export TEST_LOG_CAPTURE="$TEST_LOG_CAPTURE"
 export TEST_FAIL_FIRST="$TEST_FAIL_FIRST" 
 export TEST_VERBOSE="$TEST_VERBOSE"
 
+BUILD_ARGS=()
+if [ -n "$ZIO_BACKEND" ]; then
+    BUILD_ARGS+=("-Dzio_backend=$ZIO_BACKEND")
+fi
+
 echo "=== Building code ==="
-zig build
+zig build "${BUILD_ARGS[@]}"
 
 echo "=== Building examples ==="
-zig build examples
+zig build examples "${BUILD_ARGS[@]}"
 
 echo "=== Running unit tests ==="
 if [ -n "$TEST_FILTER" ]; then
@@ -77,6 +87,6 @@ if [ -n "$TEST_FILTER" ]; then
 else
     echo "Running all unit tests..."
 fi
-zig build test --summary all
+zig build test --summary all "${BUILD_ARGS[@]}"
 
 echo "=== All checks passed! ==="
