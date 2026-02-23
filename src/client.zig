@@ -58,11 +58,17 @@ pub const FetchOptions = struct {
     max_redirects: ?u8 = null,
     /// Decompress response body automatically (sends Accept-Encoding header).
     decompress: bool = true,
+    /// Connect over a Unix domain socket instead of TCP.
+    /// Useful for communicating with Docker Engine (e.g. "/var/run/docker.sock").
+    /// The URL host and path are still used for the HTTP request line and Host header.
+    unix_socket_path: ?[]const u8 = null,
 };
 
 /// Options for a WebSocket upgrade request.
 pub const WebSocketUpgradeOptions = struct {
     headers: ?*const Headers = null,
+    /// Connect over a Unix domain socket instead of TCP.
+    unix_socket_path: ?[]const u8 = null,
 };
 
 /// A WebSocket connection established via client upgrade.
@@ -142,8 +148,8 @@ pub const ConnectionPool = struct {
         }
     }
 
-    /// Try to acquire an existing connection for the given host:port and protocol.
-    pub fn acquire(self: *ConnectionPool, remote_host: []const u8, remote_port: u16, protocol: Protocol) ?*Connection {
+    /// Try to acquire an existing connection for the given host:port, protocol, and optional unix socket path.
+    pub fn acquire(self: *ConnectionPool, remote_host: []const u8, remote_port: u16, protocol: Protocol, unix_socket_path: ?[]const u8) ?*Connection {
         const now = zio.Timestamp.now(.monotonic);
 
         // Search from end (most recently used)
@@ -152,7 +158,7 @@ pub const ConnectionPool = struct {
             const conn: *Connection = @fieldParentPtr("pool_node", n);
             node = n.prev;
 
-            if (conn.matches(remote_host, remote_port, protocol)) {
+            if (conn.matches(remote_host, remote_port, protocol, unix_socket_path)) {
                 // Check if connection has expired due to idle timeout
                 if (conn.idle_deadline) |deadline| {
                     if (now.value >= deadline.value) {
@@ -233,6 +239,8 @@ pub const Connection = struct {
     host_len: u8 = 0,
     port: u16 = 0,
     closing: bool = false,
+    // Unix socket address (null means TCP connection)
+    unix_addr: ?zio.net.UnixAddress = null,
 
     // Keep-Alive tracking
     request_count: u16 = 0,
@@ -250,6 +258,7 @@ pub const Connection = struct {
         buffer_size: usize,
         protocol: Protocol,
         ca_bundle: ?*const std.crypto.Certificate.Bundle,
+        unix_socket_path: ?[]const u8,
     ) !void {
         self.allocator = allocator;
         self.stream = stream;
@@ -268,6 +277,9 @@ pub const Connection = struct {
         @memcpy(self.host_buffer[0..len], remote_host[0..len]);
         self.host_len = len;
         self.port = remote_port;
+
+        // Store unix socket address for connection pooling
+        self.unix_addr = if (unix_socket_path) |path| try zio.net.UnixAddress.init(path) else null;
 
         self.parsed_response = .{ .arena = self.arena.allocator() };
         self.parser.init(&self.parsed_response);
@@ -356,8 +368,17 @@ pub const Connection = struct {
         return self.host_buffer[0..self.host_len];
     }
 
-    /// Check if this connection matches the given host, port, and protocol.
-    pub fn matches(self: *const Connection, match_host: []const u8, match_port: u16, protocol: Protocol) bool {
+    pub fn unixPath(self: *const Connection) ?[]const u8 {
+        const addr = self.unix_addr orelse return null;
+        return std.mem.sliceTo(&addr.un.path, 0);
+    }
+
+    /// Check if this connection matches the given host, port, protocol, and transport.
+    pub fn matches(self: *const Connection, match_host: []const u8, match_port: u16, protocol: Protocol, unix_socket_path: ?[]const u8) bool {
+        if (unix_socket_path) |path| {
+            return self.protocol == protocol and std.mem.eql(u8, self.unixPath() orelse return false, path);
+        }
+        if (self.unix_addr != null) return false;
         return self.protocol == protocol and self.port == match_port and std.ascii.eqlIgnoreCase(self.host(), match_host);
     }
 
@@ -571,11 +592,15 @@ pub const Client = struct {
         port: u16,
         protocol: Protocol,
         ca_bundle: ?*const std.crypto.Certificate.Bundle,
+        unix_socket_path: ?[]const u8,
     ) !*Connection {
         // Try to get a connection from the pool
-        const conn = self.pool.acquire(host, port, protocol) orelse blk: {
+        const conn = self.pool.acquire(host, port, protocol, unix_socket_path) orelse blk: {
             // No pooled connection, create a new one
-            const stream = try zio.net.tcpConnectToHost(host, port, .{});
+            const stream = if (unix_socket_path) |path| unix: {
+                const unix_addr = try zio.net.UnixAddress.init(path);
+                break :unix try unix_addr.connect(.{});
+            } else try zio.net.tcpConnectToHost(host, port, .{});
             errdefer stream.close();
 
             const new_conn = try self.allocator.create(Connection);
@@ -589,6 +614,7 @@ pub const Client = struct {
                 self.config.buffer_size,
                 protocol,
                 ca_bundle,
+                unix_socket_path,
             );
 
             break :blk new_conn;
@@ -617,7 +643,7 @@ pub const Client = struct {
         } else null;
 
         // Acquire or create a connection
-        const conn = try self.acquireConnection(host, info.port, info.protocol, ca_bundle);
+        const conn = try self.acquireConnection(host, info.port, info.protocol, ca_bundle, options.unix_socket_path);
         errdefer {
             conn.deinit();
             self.allocator.destroy(conn);
@@ -720,7 +746,7 @@ pub const Client = struct {
         } else null;
 
         // Acquire or create a connection
-        const conn = try self.acquireConnection(host, port, protocol, ca_bundle);
+        const conn = try self.acquireConnection(host, port, protocol, ca_bundle, options.unix_socket_path);
         errdefer self.pool.release(conn);
 
         // Send request
