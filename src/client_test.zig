@@ -321,6 +321,7 @@ test "Client: unix socket fetch" {
             var reader = stream.reader(&read_buf);
             while (true) {
                 const line = try reader.interface.takeDelimiterExclusive('\n');
+                reader.interface.toss(1);
                 if (std.mem.trimRight(u8, line, "\r").len == 0) break;
             }
 

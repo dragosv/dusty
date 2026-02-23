@@ -239,9 +239,8 @@ pub const Connection = struct {
     host_len: u8 = 0,
     port: u16 = 0,
     closing: bool = false,
-    // Unix socket path (empty means TCP connection)
-    unix_path_buffer: [108]u8 = undefined,
-    unix_path_len: u8 = 0,
+    // Unix socket address (null means TCP connection)
+    unix_addr: ?zio.net.UnixAddress = null,
 
     // Keep-Alive tracking
     request_count: u16 = 0,
@@ -279,14 +278,8 @@ pub const Connection = struct {
         self.host_len = len;
         self.port = remote_port;
 
-        // Store unix socket path for connection pooling
-        if (unix_socket_path) |path| {
-            const ulen: u8 = @intCast(@min(path.len, self.unix_path_buffer.len));
-            @memcpy(self.unix_path_buffer[0..ulen], path[0..ulen]);
-            self.unix_path_len = ulen;
-        } else {
-            self.unix_path_len = 0;
-        }
+        // Store unix socket address for connection pooling
+        self.unix_addr = if (unix_socket_path) |path| try zio.net.UnixAddress.init(path) else null;
 
         self.parsed_response = .{ .arena = self.arena.allocator() };
         self.parser.init(&self.parsed_response);
@@ -376,19 +369,16 @@ pub const Connection = struct {
     }
 
     pub fn unixPath(self: *const Connection) ?[]const u8 {
-        if (self.unix_path_len == 0) return null;
-        return self.unix_path_buffer[0..self.unix_path_len];
+        const addr = self.unix_addr orelse return null;
+        return std.mem.sliceTo(&addr.un.path, 0);
     }
 
     /// Check if this connection matches the given host, port, protocol, and transport.
     pub fn matches(self: *const Connection, match_host: []const u8, match_port: u16, protocol: Protocol, unix_socket_path: ?[]const u8) bool {
         if (unix_socket_path) |path| {
-            // Unix socket connection: match on the socket path and protocol
-            if (self.unix_path_len == 0) return false;
-            return self.protocol == protocol and std.mem.eql(u8, self.unix_path_buffer[0..self.unix_path_len], path);
+            return self.protocol == protocol and std.mem.eql(u8, self.unixPath() orelse return false, path);
         }
-        // TCP connection: must not be a unix socket connection
-        if (self.unix_path_len != 0) return false;
+        if (self.unix_addr != null) return false;
         return self.protocol == protocol and self.port == match_port and std.ascii.eqlIgnoreCase(self.host(), match_host);
     }
 
