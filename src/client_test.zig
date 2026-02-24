@@ -290,7 +290,7 @@ test "Client: unix socket fetch" {
     const Test = struct {
         pub fn mainFn() !void {
             var path_buf: [64]u8 = undefined;
-            const socket_path = try std.fmt.bufPrint(&path_buf, "/tmp/dusty-client-test-unix-{d}.sock", .{std.os.linux.getpid()});
+            const socket_path = try std.fmt.bufPrint(&path_buf, "/tmp/dusty-client-test-unix-{d}.sock", .{std.c.getpid()});
             std.fs.cwd().deleteFile(socket_path) catch {};
 
             var ready_buf: [1]bool = undefined;
